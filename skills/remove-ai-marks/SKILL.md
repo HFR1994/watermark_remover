@@ -320,7 +320,7 @@ After Layer A, **always propose** a statistical-mark reduction pass for natural-
 
 For **plain text** (pasted / `.txt` / `.text`), `/clean` **requires** Layer B:
 it applies the default strategy (`config/clean_strategy.json`, shipped as
-`academic@0.4`) or the `options.strategy` override after Layer A, reports
+`paraphrase@0.8,mlm@0.2`) or the `options.strategy` override after Layer A, reports
 `report.layer_b`, and returns **400** when the required backend isn't
 configured (LLM steps need the `WATERMARKS_REWRITE_*` config; the optional
 `mlm` step needs the service's `requirements-mlm.txt` stack — torch,
@@ -346,7 +346,7 @@ Prefer local open-weight models and avoid any known-watermarked vendor.
 `humanize`, `chunk`, `backtranslate`, `structural`, `code` and `mlm`, each at
 an intensity in (0, 1]:
 
-- `academic@0.3`–`0.5` (the default is `academic@0.4`) for scientific,
+- `academic@0.3`–`0.5` (pass it as `options.strategy`) for scientific,
   technical, legal or otherwise precise prose, in any language: it keeps the
   language, every term of art, unit and citation as written, the epistemic
   force of each claim (a hedge stays a hedge, a conjecture never becomes a
