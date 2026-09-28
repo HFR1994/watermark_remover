@@ -304,6 +304,10 @@ def detect_container_format(path: Path, data: bytes | None = None) -> str:
         return "markdown"
     if ext in (".tex", ".ltx"):
         return "latex"
+    if ext == ".typ":
+        return "typst"
+    if ext == ".csl":
+        return "csl"
     if data is not None:
         if data[:4] == b"%PDF":
             return "pdf"
@@ -1366,6 +1370,241 @@ def clean_latex(text: str) -> tuple[str, list[str]]:
 
     if not actions:
         actions.append("no LaTeX metadata removed")
+    return text, actions
+
+
+# ---------------------------------------------------------------------------
+# Typst (.typ)
+# ---------------------------------------------------------------------------
+#
+# A Typst source carries provenance as the PDF metadata it compiles into
+# (#set document(author:, keywords:, description:, date:)) and as comments.
+# inspect_typst/clean_typst mirror the LaTeX handlers: the always-clear fields
+# are removed whatever their value, any other entry naming an AI tool or C2PA
+# goes too, and the title is kept. An absent date means "now" to Typst, so a
+# cleared date becomes `date: none` rather than disappearing. Comments are
+# dropped when they carry AI markers or are editor modelines. Raw blocks,
+# strings and math are never read as comments (typst_mask walks the source).
+
+_TYPST_CLEAR_DOCUMENT_KEYS: frozenset[str] = frozenset(
+    {"author", "keywords", "description", "date"}
+)
+_TYPST_SET_DOCUMENT_RE = re.compile(r"#set\s+document\s*\(")
+
+
+def _typst_comment_class(comment: str) -> tuple[bool, str, bool]:
+    """Return (drop, label, ai) for a // or /* */ comment."""
+    if AI_META_NAME_RE.search(comment) or _comment_is_provenance(comment):
+        return True, "AI markers", True
+    if "-*-" in comment or _LATEX_VIM_MODELINE_RE.search(comment):
+        return True, "editor modeline", False
+    return False, "", False
+
+
+def _typst_entry_class(name: str | None, value: str) -> tuple[bool, bool, bool]:
+    """Return (ai, c2pa, clear) for one #set document(...) argument."""
+    clear = name in _TYPST_CLEAR_DOCUMENT_KEYS
+    ai = named_value_is_ai(name or "", value)
+    c2pa = bool(_C2PA_RE.search(value))
+    return ai, c2pa, clear
+
+
+def _typst_documents(text: str) -> list[tuple[int, int, int, list[tuple[str | None, int, int]]]]:
+    """(start, open_paren, end, arguments) of every live #set document(...) call."""
+    from typst_mask import call_arguments, markup_spans
+
+    found = []
+    for kind, start, end in markup_spans(text):
+        match = _TYPST_SET_DOCUMENT_RE.match(text, start, end)
+        if kind != "code" or not match:
+            continue
+        arguments, call_end = call_arguments(text, match.end() - 1)
+        found.append((start, match.end() - 1, call_end, arguments))
+    return found
+
+
+def _typst_comments(text: str) -> list[tuple[int, int]]:
+    """(start, end) of every comment outside raw spans, strings and math."""
+    from typst_mask import markup_spans
+
+    return [(start, end) for kind, start, end in markup_spans(text) if kind == "comment"]
+
+
+def inspect_typst(text: str) -> tuple[bool, bool, list[str], dict]:
+    """Inspect a Typst source for provenance metadata and comments.
+
+    Returns (has_c2pa, has_ai, findings, details); details carries document-call,
+    dropped-entry and dropped-comment counts, plus `parse_error` when the source
+    has unbalanced brackets or an unterminated string (nothing is read then).
+    """
+    findings: list[str] = []
+    has_ai = has_c2pa = False
+    keys_dropped = comments_dropped = 0
+    try:
+        documents = _typst_documents(text)
+        comments = _typst_comments(text)
+    except ValueError as e:
+        return False, False, [f"info: typst not parsed ({e})"], {"parse_error": str(e)}
+    for _start, _open, _end, arguments in documents:
+        for name, a_start, a_end in arguments:
+            ai, c2pa, clear = _typst_entry_class(name, text[a_start:a_end])
+            if not (ai or c2pa or clear):
+                continue
+            keys_dropped += 1
+            prefix = "typst ai:" if (ai or c2pa) else "info: typst"
+            findings.append(f"{prefix} document {name or 'argument'}")
+            has_c2pa = has_c2pa or c2pa
+            has_ai = has_ai or ai or c2pa
+    for start, end in comments:
+        drop, label, ai = _typst_comment_class(text[start:end])
+        if drop:
+            comments_dropped += 1
+            findings.append(f"{'typst ai:' if ai else 'info: typst'} comment ({label})")
+            has_ai = has_ai or ai
+    details = {
+        "documents": len(documents),
+        "keys_dropped": keys_dropped,
+        "comments_dropped": comments_dropped,
+    }
+    return has_c2pa, has_ai or has_c2pa, findings, details
+
+
+def _widen_to_line(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen a span so dropping it leaves no blank line or trailing blanks."""
+    line_start = text.rfind("\n", 0, start) + 1
+    newline = text.find("\n", end)
+    line_end = len(text) if newline == -1 else newline
+    if not text[line_start:start].strip() and not text[end:line_end].strip():
+        return line_start, line_end + 1 if newline != -1 else line_end
+    while start > line_start and text[start - 1] in " \t":
+        start -= 1
+    return start, end
+
+
+def clean_typst(text: str) -> tuple[str, list[str]]:
+    """Strip Typst provenance metadata from a source.
+
+    Removes the always-clear #set document entries (a date becomes `none`) and
+    any AI/C2PA-marked entry, drops a #set document call left empty, and drops
+    AI-marked comments and editor modelines. Returns (text, actions).
+    """
+    try:
+        documents = _typst_documents(text)
+    except ValueError as e:
+        return text, [f"typst not parsed, left unchanged ({e})"]
+    actions: list[str] = []
+    out: list[str] = []
+    last = 0
+    for start, open_paren, end, arguments in documents:
+        kept: list[str] = []
+        removed: list[str] = []
+        for name, a_start, a_end in arguments:
+            ai, c2pa, clear = _typst_entry_class(name, text[a_start:a_end])
+            if ai or c2pa or clear:
+                removed.append(name or "argument")
+                if name == "date":
+                    kept.append("date: none")
+            else:
+                kept.append(text[a_start:a_end])
+        if not removed:
+            continue
+        out.append(text[last:start])
+        if kept:
+            out.append(f"{text[start : open_paren + 1]}{', '.join(kept)})")
+            actions.extend(f"drop document {name}" for name in removed)
+        else:
+            actions.append("drop #set document")
+        last = end
+    out.append(text[last:])
+    text = "".join(out)
+
+    spans = []
+    for start, end in _typst_comments(text):
+        drop, label, _ai = _typst_comment_class(text[start:end])
+        if drop:
+            spans.append(_widen_to_line(text, start, end))
+            actions.append(f"drop comment: {label}")
+    for start, end in reversed(spans):
+        text = text[:start] + text[end:]
+
+    if not actions:
+        actions.append("no Typst metadata removed")
+    return text, actions
+
+
+# ---------------------------------------------------------------------------
+# CSL (.csl citation styles)
+# ---------------------------------------------------------------------------
+#
+# A CSL style is XML. Its <info> block credits people (<author>, <contributor>)
+# and describes the style (<summary>); XML comments can carry anything. Only
+# entries that name an AI tool are dropped: <author>/<contributor> are naming
+# fields (a vendor or model name there is provenance), <summary> is free prose
+# (only never-ordinary markers such as "generated with" or "c2pa" count), and
+# comments follow the HTML/Markdown provenance-comment rule. The required
+# <title>, <id> and <updated> are never touched, so the style stays valid.
+
+_CSL_PERSON_TAGS = ("author", "contributor")
+
+
+def _csl_block_re(tag: str) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    return re.compile(rf"<{tag}\b[^>]*>", re.I), re.compile(rf"</{tag}\s*>", re.I)
+
+
+def _csl_person_is_ai(block: str) -> bool:
+    return named_value_is_ai("creator", re.sub(r"<[^>]+>", " ", block)) or bool(
+        _C2PA_RE.search(block)
+    )
+
+
+def _csl_summary_is_ai(block: str) -> bool:
+    return named_value_is_ai("summary", re.sub(r"<[^>]+>", " ", block))
+
+
+def _csl_ai_spans(text: str) -> list[tuple[str, int, int]]:
+    """(label, start, end) of each comment or <info> entry carrying AI provenance.
+
+    Shared by inspect_csl and clean_csl so the two cannot disagree.
+    """
+    found: list[tuple[str, int, int]] = []
+    for os_, _oe, _cs, ce in _iter_tag_blocks(
+        text, _MARKUP_COMMENT_OPEN_RE, _MARKUP_COMMENT_CLOSE_RE
+    ):
+        if _comment_is_provenance(text[os_:ce]):
+            found.append(("comment", os_, ce))
+    checks = [(tag, _csl_person_is_ai) for tag in _CSL_PERSON_TAGS]
+    checks.append(("summary", _csl_summary_is_ai))
+    for tag, is_ai in checks:
+        for os_, _oe, _cs, ce in _iter_tag_blocks(text, *_csl_block_re(tag)):
+            if is_ai(text[os_:ce]):
+                found.append((tag, os_, ce))
+    found.sort(key=lambda item: item[1])
+    # An entry inside a dropped comment goes with it.
+    kept: list[tuple[str, int, int]] = []
+    for item in found:
+        if kept and item[1] < kept[-1][2]:
+            continue
+        kept.append(item)
+    return kept
+
+
+def inspect_csl(text: str) -> tuple[bool, bool, list[str], dict]:
+    """Inspect a CSL style for AI-provenance credits, summaries and comments."""
+    spans = _csl_ai_spans(text)
+    findings = [f"csl ai: {label}" for label, _start, _end in spans]
+    has_c2pa = any(_C2PA_RE.search(text[start:end]) for _label, start, end in spans)
+    return has_c2pa, bool(spans), findings, {"entries_dropped": len(spans)}
+
+
+def clean_csl(text: str) -> tuple[str, list[str]]:
+    """Drop AI-provenance <author>/<contributor>/<summary> entries and comments."""
+    spans = _csl_ai_spans(text)
+    for _label, span_start, span_end in reversed(spans):
+        start, end = _widen_to_line(text, span_start, span_end)
+        text = text[:start] + text[end:]
+    actions = [f"drop {label}" for label, _start, _end in spans]
+    if not actions:
+        actions.append("no CSL metadata removed")
     return text, actions
 
 
@@ -4341,6 +4580,12 @@ def inspect_container(
     elif fmt == "latex":
         body = data.decode("utf-8", errors="surrogateescape")
         has_c2pa, has_ai, findings, details = inspect_latex(body)
+    elif fmt == "typst":
+        body = data.decode("utf-8", errors="surrogateescape")
+        has_c2pa, has_ai, findings, details = inspect_typst(body)
+    elif fmt == "csl":
+        body = data.decode("utf-8", errors="surrogateescape")
+        has_c2pa, has_ai, findings, details = inspect_csl(body)
     else:
         has_c2pa, has_ai, findings = False, False, [f"unsupported container: {fmt}"]
         details = {"unsupported": True}
@@ -4349,7 +4594,7 @@ def inspect_container(
     # inspect predicts clean rather than contradicting it.
     layer_a_total = 0
     layer_a_hits: list[dict] = []
-    if fmt in ("markdown", "html", "latex"):
+    if fmt in ("markdown", "html", "latex", "typst", "csl"):
         from text_unicode import inspect_text  # local import to avoid cycles
 
         ta = inspect_text(body).to_dict()
@@ -4407,6 +4652,12 @@ def inspect_container(
         notes.append(
             "LaTeX: \\hypersetup/\\pdfinfo provenance fields and provenance/tooling comment lines are scanned"
         )
+    elif fmt == "typst":
+        notes.append(
+            "Typst: #set document provenance fields and provenance/modeline comments are scanned"
+        )
+    elif fmt == "csl":
+        notes.append("CSL: <info> author/contributor/summary entries and XML comments are scanned")
     if "unsupported" in details:
         notes.append(f"format not fully inspected: {fmt}")
     if layer_a_total:
@@ -4517,9 +4768,10 @@ def clean_container(
                 )
                 text = text2
         safe_write_text(dest, text)
-    elif fmt == "latex":
+    elif fmt in ("latex", "typst", "csl"):
         text = data.decode("utf-8", errors="surrogateescape")
-        text, actions = clean_latex(text)
+        cleaner = {"latex": clean_latex, "typst": clean_typst, "csl": clean_csl}[fmt]
+        text, actions = cleaner(text)
         if also_layer_a_text:
             text2, stats = clean_text(text, normalize_spaces=normalize_spaces)
             if stats["removed_count"] or stats["replaced_count"]:

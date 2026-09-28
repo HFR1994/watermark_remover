@@ -37,7 +37,7 @@ def _noop_layer_b_for_non_strategy_tests(monkeypatch: pytest.MonkeyPatch, reques
     monkeypatch.setattr(
         server,
         "_apply_layer_b",
-        lambda text, strategy, options: (
+        lambda text, strategy, options, **_kwargs: (
             text,
             {"strategy": list(strategy.split(",")), "steps": []},
         ),

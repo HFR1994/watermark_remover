@@ -191,14 +191,16 @@ clients.
   `config/clean_strategy.json`; step 4 says which files get it and when it
   answers 400); `rewrite` (`false`: Layer A only, no model call; `true`: run
   the strategy on a file that would not get it by default, such as a `.tex`,
-  `.md` or code file); `protect_latex` (`auto` | `on` | `off`: hold math,
+  `.typ`, `.md` or code file); `protect_latex` (`auto` | `on` | `off`: hold math,
   LaTeX commands/environments, citation keys and code spans out of the
-  rewrite); `style`, a free-form writing-style request appended to the
+  rewrite); `protect_typst` (the same for a `.typ` source: math, `#` code,
+  `@` references, `<labels>`, comments and raw spans); `style`, a free-form writing-style request appended to the
   rewrite prompt (a request, not a guarantee); and `also_layer_a_text`, which
   runs Layer A once more over the rewrite output.
 - Containers: `also_layer_a_text` (default `true`: Layer A over the container's
   text; `normalize_spaces` applies there too); `rewrite`, `strategy`,
-  `protect_latex` and `style` as above for `.tex` / `.ltx` / `.md`.
+  `protect_latex` and `style` as above for `.tex` / `.ltx` / `.md`, and
+  `protect_typst` in place of `protect_latex` for `.typ`.
 - Images, audio and video metadata: `strip_all_metadata` (the default: strip
   everything) or `keep_non_ai_metadata` (strip only AI/C2PA markers and keep
   the rest).
@@ -251,6 +253,8 @@ Intended for **your own** content (privacy, hygiene, research). Do not market re
 | `.txt` / `.text` | text: Layer A + the required Layer B rewrite (step 4) |
 | Code, config, data (`.py`, `.js`, `.json`, `.yaml`, `.csv`, `.rst`, `.po`, …) | text Layer A only (+ formatter for code); a rewrite only with an explicit `options.strategy` |
 | `.tex` / `.ltx` / `.md` | container clean (`\hypersetup`/`\pdfinfo` or frontmatter + comment provenance) + Layer A; add `{"rewrite": true}` for the Layer B strategy over the prose with math, commands, environments, citation keys and code masked out (step 4) |
+| `.typ` (Typst) | container clean (`#set document` author/keywords/description/date + AI-marked comments) + Layer A; add `{"rewrite": true}` for the Layer B strategy over the prose with math, `#` code, references, labels and raw spans masked out (step 4) |
+| `.csl` (citation style) | container clean (AI-marked `<author>`/`<contributor>`/`<summary>` and XML comments) + Layer A; no Layer B (a style has no prose) |
 | `.html` | container clean (meta generator / JSON-LD / data-ai*) + Layer A; Layer B to the prose via a `/clean` text pass or the agent rewrite model |
 | `.png` / `.jpg` / `.jpeg` / `.webp` / `.avif` / `.heic` / `.bmp` / `.gif` / `.tiff` | image metadata strip |
 | `.svg` / `.pdf` / `.docx` / `.xlsx` / `.pptx` / `.epub` / `.odt` | container metadata strip |
@@ -330,13 +334,14 @@ this from a 400. Other text files (code, config, data, markup and
 localization: `.py`, `.json`, `.csv`, `.rst`, `.po`, …) get Layer A only, and
 `report.layer_b.skipped` says so: a paraphrase would rewrite their
 identifiers, keys and values. They get a rewrite only when the request passes
-`options.strategy` (for code, `code@…`, with the user's OK). LaTeX and
-Markdown sources (`.tex`, `.ltx`, `.md`) are containers: by default `/clean`
+`options.strategy` (for code, `code@…`, with the user's OK). LaTeX, Typst and
+Markdown sources (`.tex`, `.ltx`, `.typ`, `.md`) are containers: by default `/clean`
 strips their metadata and runs Layer A; with `options.rewrite: true` (or an
 `options.strategy`) it also runs the Layer B strategy over their prose, with
 math, commands, environments, citation keys, code spans and front matter
-masked out and restored afterwards (`report.layer_b.latex` says whether every
-span came back). Other containers (`.html`, `.pdf`, `.docx`, …) do **not** run
+(for Typst: math, `#` code, `@` references, `<labels>`, comments and raw spans)
+masked out and restored afterwards (`report.layer_b.latex`, or
+`report.layer_b.typst` for a `.typ`, says whether every span came back). Other containers (`.html`, `.pdf`, `.docx`, …) do **not** run
 Layer B in `/clean`; apply it to their prose by extracting the text and
 passing it to `/clean` as text, or by running the prompts below with a model
 **≠ suspected origin** (Claude text → not Claude; Gemini → not Gemini; etc.).
@@ -604,6 +609,13 @@ Always state:
   field names (`pdfauthor`/`pdfcreator`/`pdfproducer`, `/Author`/`/Creator`/`/Producer`,
   plus `pdfsubject`/`pdfkeywords` and the PDF date fields), and drops `% !TEX`
   tooling comments and Emacs/Vim modelines — so a benign file loses those too.
+- `.typ`: the same source-level strip for Typst. `#set document` loses
+  `author`, `keywords` and `description` whatever their value, and a `date`
+  becomes `date: none` (an absent date means "now" to Typst); `title` stays.
+  `//` and `/* */` comments that name an AI tool, and editor modelines, are
+  dropped; comments inside raw blocks and strings are left alone.
+- `.csl`: only `<info>` entries and XML comments that name an AI tool are
+  dropped; the style's `<title>`, `<id>`, `<updated>` and human credits stay.
 - Pixel-domain **image** watermarks can be removed optionally via the external CtrlRegen backend (`remove_pixel: ctrlregen`) or MarkDiffusion's DiffusionPurification (`remove_pixel: diffusion`); both are heavy, drift the image, and need the backend present (`/capabilities`). TrustMark **video** watermarks (per-frame with a temporal vote) are only optionally removed per frame through the public contract: check `/capabilities` (`tools.ffmpeg` and `pixel_backends.ctrlregen`/`diffusion`), then POST `/clean` on an `.mp4`/`.mov` with `options.remove_pixel` = `ctrlregen`\|`diffusion`. It is partial, re-encodes the video, and is not vendor-detector-verified. **Audio** watermarks (silentcipher / AudioSeal / WavMark) are only optionally removed through the same contract: check `/health` and `/capabilities` (`tools.ffmpeg`), then POST `/clean` on an audio name (`.wav`/`.mp3`/`.flac`) with `options.remove_audio_watermark` = true. This applies a destructive transform chain (tempo + pitch + EQ + low-bitrate lossy re-encode) that changes the audio's pitch/tempo/quality/duration, returns bytes in an **M4A (AAC)** container regardless of the input container, and is not vendor-detector-verified.
 - The reverse-SynthID scorer is external, best-effort, and under a non-commercial Research License; not an official Google detector. Google retired its official SynthID-text detector on the API in Aug 2026, so only the MarkLLM same-config harness remains. Claude's detection API has been announced but is not public yet — the `claude-text` detector reports unavailable until it ships.
 - **C2PA soft binding** (content watermark that re-links to a remote manifest after metadata strip) is out of scope — stripping hard-bound C2PA does not clear it.

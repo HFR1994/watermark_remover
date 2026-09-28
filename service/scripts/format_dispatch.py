@@ -51,6 +51,8 @@ CONTAINER_EXTS = {
     ".mdx",
     ".tex",
     ".ltx",
+    ".typ",
+    ".csl",
 }
 #: Plain-text formats the Layer A scanner reads and the clean hooks rewrite. An
 #: absent suffix is left unread and unrouted, so keep this table broad: every

@@ -126,6 +126,7 @@ ALLOWED_CLEAN_OPTIONS = {
     "style": str,
     "strategy": str,
     "protect_latex": str,
+    "protect_typst": str,
     "rewrite": bool,
 }
 
@@ -143,8 +144,9 @@ LAYER_B_DEFAULT_EXTS = frozenset({".txt", ".text"})
 # Container formats whose prose can take the Layer B rewrite on request
 # (options.rewrite: true or options.strategy): their math, commands,
 # environments, citation keys, code spans and front matter are masked out first
-# (latex_mask), and the metadata strip + Layer A have already run.
-LAYER_B_CONTAINER_FORMATS = frozenset({"latex", "markdown"})
+# (latex_mask; for Typst, math, code, references, labels and raw spans through
+# typst_mask), and the metadata strip + Layer A have already run.
+LAYER_B_CONTAINER_FORMATS = frozenset({"latex", "markdown", "typst"})
 
 
 @cache
@@ -538,6 +540,16 @@ def _layer_b_report_schema() -> dict[str, Any]:
     )
 
     kinds = _schema(type="array", items=_schema(type="string", enum=list(WRAPPER_KINDS)))
+    round_trip = _schema(
+        type="object",
+        description="Placeholder round trip; missing > 0 means a span was lost",
+        properties={
+            "protected": _schema(type="integer"),
+            "restored": _schema(type="integer"),
+            "missing": _schema(type="integer"),
+            "duplicated": _schema(type="integer"),
+        },
+    )
     drift = (
         f"length drift: output/input ratio outside {LENGTH_DRIFT_MIN_RATIO:g}-"
         f"{LENGTH_DRIFT_MAX_RATIO:g}, beyond {LENGTH_DRIFT_SLACK_CHARS} chars"
@@ -616,16 +628,15 @@ def _layer_b_report_schema() -> dict[str, Any]:
             "latex_protected": _schema(
                 type="integer", description="Math/LaTeX/code spans masked out of the rewrite"
             ),
-            "latex": _schema(
-                type="object",
-                description="Placeholder round trip; missing > 0 means a span was lost",
-                properties={
-                    "protected": _schema(type="integer"),
-                    "restored": _schema(type="integer"),
-                    "missing": _schema(type="integer"),
-                    "duplicated": _schema(type="integer"),
-                },
+            "protect_typst": _schema(
+                type="string", enum=["auto", "on", "off"], description="Typst sources only"
             ),
+            "typst_protected": _schema(
+                type="integer",
+                description="Math, Typst code, references, labels and raw spans masked out",
+            ),
+            "latex": round_trip,
+            "typst": round_trip,
             "skipped": _schema(type="boolean", description="No rewrite ran (see reason)"),
             "reason": _schema(type="string"),
         },
@@ -1184,10 +1195,15 @@ def _parse_clean_options(options: Any) -> dict[str, Any]:
 
         parse_strategy(options["strategy"])
     from latex_mask import PROTECT_LATEX_MODES
+    from typst_mask import PROTECT_TYPST_MODES
 
-    protect_latex = options.get("protect_latex")
-    if protect_latex is not None and protect_latex not in PROTECT_LATEX_MODES:
-        raise ValueError(f"option 'protect_latex' must be one of {sorted(PROTECT_LATEX_MODES)}")
+    for name, modes in (
+        ("protect_latex", PROTECT_LATEX_MODES),
+        ("protect_typst", PROTECT_TYPST_MODES),
+    ):
+        value = options.get(name)
+        if value is not None and value not in modes:
+            raise ValueError(f"option '{name}' must be one of {sorted(modes)}")
     return options
 
 
@@ -1248,8 +1264,13 @@ def _rewrite_backend_error() -> str | None:
     return None
 
 
-def _apply_layer_b(text: str, strategy: str, options: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _apply_layer_b(
+    text: str, strategy: str, options: dict[str, Any], *, syntax: str = "latex"
+) -> tuple[str, dict[str, Any]]:
     """Apply a Layer B rewrite strategy to *text*, rejecting if unavailable.
+
+    *syntax* picks the span masker: ``"latex"`` (LaTeX and Markdown math) or
+    ``"typst"`` for a Typst source.
 
     Raises ValueError for an unconfigured/unavailable backend or model so the
     caller surfaces a 400 rather than a 500. Wraps runtime failures the same way;
@@ -1308,6 +1329,9 @@ def _apply_layer_b(text: str, strategy: str, options: dict[str, Any]) -> tuple[s
     protect_latex = (
         options.get("protect_latex") or os.environ.get("WATERMARKS_PROTECT_LATEX") or "auto"
     )
+    protect_typst = (
+        options.get("protect_typst") or os.environ.get("WATERMARKS_PROTECT_TYPST") or "auto"
+    )
     try:
         out, stats = apply_strategy(
             text,
@@ -1324,6 +1348,8 @@ def _apply_layer_b(text: str, strategy: str, options: dict[str, Any]) -> tuple[s
             candidates=_env_int("WATERMARKS_REWRITE_CANDIDATES", DEFAULT_CANDIDATES),
             max_loops=_env_int("WATERMARKS_REWRITE_LOOPS", DEFAULT_MAX_LOOPS),
             protect_latex=protect_latex,
+            syntax=syntax,
+            protect_typst=protect_typst,
         )
     except (RuntimeError, TimeoutError, urllib.error.URLError) as e:
         # A read timeout surfaces as TimeoutError, a connect timeout as a
@@ -1734,8 +1760,8 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
                         "skipped": True,
                         "reason": (
                             f"{fmt} source: pass options.rewrite: true (or options.strategy) "
-                            "to run the Layer B strategy over its prose with math, LaTeX "
-                            "commands, environments, citation keys and code spans masked out"
+                            "to run the Layer B strategy over its prose with math, markup "
+                            "commands, citation keys or references and code spans masked out"
                         ),
                     }
                 else:
@@ -1747,10 +1773,14 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
                             "or pass options.strategy"
                         )
                     text = cleaned_bytes.decode("utf-8", errors="surrogateescape")
-                    # A source file is LaTeX/Markdown by name: protect its spans
-                    # unless the request says otherwise.
-                    b_options = {**options, "protect_latex": options.get("protect_latex") or "on"}
-                    rewritten, layer_b = _apply_layer_b(text, strategy, b_options)
+                    # A source file is LaTeX/Markdown/Typst by name: protect its
+                    # spans unless the request says otherwise.
+                    syntax = "typst" if fmt == "typst" else "latex"
+                    b_options = {
+                        **options,
+                        f"protect_{syntax}": options.get(f"protect_{syntax}") or "on",
+                    }
+                    rewritten, layer_b = _apply_layer_b(text, strategy, b_options, syntax=syntax)
                     cleaned_bytes = rewritten.encode("utf-8", errors="surrogateescape")
                     report["layer_b"] = layer_b
         report.pop("input", None)

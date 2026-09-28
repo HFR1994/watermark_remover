@@ -37,6 +37,9 @@ deterministic passes, so no model reformats an equation or drops a citation key
 in the name of better prose. Restoration is reported (protected / restored /
 missing / duplicated), never assumed. The print-prompt backend has no output to
 restore from, so there the prompt carries a preserve-verbatim instruction instead.
+For Typst sources (--syntax typst, picked automatically for a .typ path)
+--protect-typst does the same for math, Typst code, references, labels, comments
+and raw spans.
 
 The rewrite instruction comes from --tactic (a named prompt) and, when
 --rewrite-level is set, that prompt is further modulated by a numeric rewrite
@@ -84,6 +87,7 @@ import urllib.error
 import urllib.request
 import warnings
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -102,6 +106,8 @@ from humanize_pass import humanize_pass
 from latex_mask import LatexMask, looks_like_latex, mask_latex, placeholder_error, restore_latex
 from text_detectors import GumbelTextDetector, MarkLLMTextDetector
 from text_unicode import clean_text
+from typst_mask import TypstMask, looks_like_typst, mask_typst, restore_typst
+from typst_mask import placeholder_error as typst_placeholder_error
 
 DEFAULT_MARKLLM_MODEL = "facebook/opt-1.3b"
 DEFAULT_CANDIDATES = 1
@@ -1100,28 +1106,73 @@ def _style_clause(style: str) -> str:
     )
 
 
-def _latex_placeholder_clause(mask: LatexMask) -> str:
-    """The instruction that keeps masked math/LaTeX placeholders intact.
+#: Source markup whose protected spans can be masked out of a rewrite: LaTeX
+#: (and Markdown math) through latex_mask, Typst through typst_mask.
+SOURCE_SYNTAXES = ("latex", "typst")
+
+SourceMask = LatexMask | TypstMask
+
+
+def _mask_source(text: str, *, mode: str, syntax: str) -> tuple[str, SourceMask]:
+    """Mask *text* with the masker for *syntax*."""
+    if syntax == "typst":
+        return mask_typst(text, mode=mode)
+    return mask_latex(text, mode=mode)
+
+
+def _restore_source(text: str, mask: SourceMask) -> tuple[str, dict[str, int]]:
+    """Put back the spans of whichever mask *mask* is."""
+    if isinstance(mask, TypstMask):
+        return restore_typst(text, mask)
+    return restore_latex(text, mask)
+
+
+def _source_placeholder_error(text: str, mask: SourceMask) -> str | None:
+    """Reject lost, duplicated, invented or reordered placeholders of *mask*."""
+    if isinstance(mask, TypstMask):
+        return typst_placeholder_error(text, mask)
+    return placeholder_error(text, mask)
+
+
+def _source_label(mask: SourceMask) -> str:
+    """The markup name used in warnings and errors about *mask*."""
+    return "Typst" if isinstance(mask, TypstMask) else "LaTeX"
+
+
+def _latex_placeholder_clause(mask: SourceMask) -> str:
+    """The instruction that keeps masked math/LaTeX/Typst placeholders intact.
 
     The placeholders are restored mechanically afterwards, so a model that drops
     one costs the document an equation; say so plainly in the prompt.
     """
+    spans = (
+        "mathematics, Typst code, references or raw spans"
+        if isinstance(mask, TypstMask)
+        else "mathematics, LaTeX commands or verbatim spans"
+    )
     return (
         f"The text contains {mask.count} protected token(s) of the form "
-        f"{mask.token(0)} standing for mathematics, LaTeX commands or verbatim "
-        "spans. Reproduce every one of them exactly as written, in the same order, "
-        "and keep them attached to the sentence that carries them. Never translate, "
-        "renumber, reformat, merge, drop or invent such a token."
+        f"{mask.token(0)} standing for {spans}. Reproduce every one of them exactly "
+        "as written, in the same order, and keep them attached to the sentence that "
+        "carries them. Never translate, renumber, reformat, merge, drop or invent "
+        "such a token."
     )
 
 
-def _latex_guard_clause() -> str:
+def _latex_guard_clause(syntax: str = "latex") -> str:
     """The preserve-verbatim instruction used when spans cannot be masked.
 
     ``print-prompt`` hands the prompt to another agent and never sees the output,
     so there is no map to restore from; the instruction is the only protection
     available on that path, and it is a request rather than a guarantee.
     """
+    if syntax == "typst":
+        return (
+            "Reproduce all mathematics, Typst code (anything introduced by #), "
+            "references (@key), labels (<key>), comments, and raw/code spans exactly "
+            "as they appear: symbols, indices, signs, delimiters, and spacing inside "
+            "them are not part of the rewrite."
+        )
     return (
         "Reproduce all mathematics, LaTeX commands, environments, citation keys, "
         "labels, and verbatim/code spans exactly as they appear: symbols, indices, "
@@ -1137,8 +1188,9 @@ def build_prompt(
     original_lang: str = "English",
     rewrite_level: float | None = None,
     style: str | None = None,
-    mask: LatexMask | None = None,
+    mask: SourceMask | None = None,
     latex_guard: bool = False,
+    syntax: str = "latex",
 ) -> str:
     """Construct the LLM rewrite prompt for a given tactic and intensity."""
     if tactic is None:
@@ -1166,7 +1218,7 @@ def build_prompt(
     if mask is not None and mask.count:
         latex_clause = _latex_placeholder_clause(mask)
     elif latex_guard:
-        latex_clause = _latex_guard_clause()
+        latex_clause = _latex_guard_clause(syntax)
     if latex_clause:
         suffix = "\n\n---\n"
         if header.endswith(suffix):
@@ -1196,7 +1248,7 @@ def _two_step_generate(
     lang: str,
     original_lang: str,
     style: str | None = None,
-    mask: LatexMask | None = None,
+    mask: SourceMask | None = None,
 ) -> tuple[str, list[str]]:
     """Run a TWO_STEP_PROMPTS tactic as two generations, in order.
 
@@ -1575,18 +1627,27 @@ def rewrite(
     chunk_shuffle: bool = False,
     noop_lex_floor: float = 0.05,
     protect_latex: str = "auto",
+    syntax: str = "latex",
+    protect_typst: str = "auto",
 ) -> tuple[str, dict]:
-    """Execute text rewrite pass across candidates and select best candidate."""
+    """Execute text rewrite pass across candidates and select best candidate.
+
+    *syntax* names the source markup whose spans are masked: ``"latex"`` (the
+    default, which also covers Markdown math) under *protect_latex*, or
+    ``"typst"`` under *protect_typst*.
+    """
     # Math, LaTeX control structures and verbatim spans carry no token-sampling
     # watermark worth attacking, so they leave the text as placeholders and come
     # back after the deterministic passes have run. print-prompt has no output to
     # restore from, so that path asks the prompt to preserve them instead.
     is_print_prompt = backend == "print-prompt"
+    protect = protect_typst if syntax == "typst" else protect_latex
+    looks_like = looks_like_typst if syntax == "typst" else looks_like_latex
     if is_print_prompt:
-        work_text, mask = text, LatexMask()
-        guard = protect_latex == "on" or (protect_latex == "auto" and looks_like_latex(text))
+        work_text, mask = text, (TypstMask() if syntax == "typst" else LatexMask())
+        guard = protect == "on" or (protect == "auto" and looks_like(text))
     else:
-        work_text, mask = mask_latex(text, mode=protect_latex)
+        work_text, mask = _mask_source(text, mode=protect, syntax=syntax)
         guard = False
     prompt = build_prompt(
         tactic,
@@ -1597,15 +1658,16 @@ def rewrite(
         style=style,
         mask=mask,
         latex_guard=guard,
+        syntax=syntax,
     )
     info: dict = {
         "backend": backend,
         "tactic": tactic,
-        "protect_latex": protect_latex,
-        "latex_protection": (
+        f"protect_{syntax}": protect,
+        f"{syntax}_protection": (
             "prompt-guard" if guard else ("placeholders" if mask.count else "none")
         ),
-        "latex_protected": mask.count,
+        f"{syntax}_protected": mask.count,
         "rewrite_level": rewrite_level,
         "style": style,
         "target_margin": target_margin,
@@ -1680,7 +1742,7 @@ def rewrite(
     def _rewrite_unit(unit: str, removed: list[str]) -> str:
         """Rewrite a single text unit, recording any stripped model wrappers."""
         local = len(mask.token_re.findall(unit)) if mask.count else 0
-        unit_mask = LatexMask(spans=("",) * local, prefix=mask.prefix) if local else None
+        unit_mask = replace(mask, spans=("",) * local) if local else None
         out, unit_removed = _generate_rewrite(
             backend,
             base_url,
@@ -1758,10 +1820,10 @@ def rewrite(
             # protected spans (humanize_pass would rewrite a LaTeX en dash, and a
             # Layer A scrub has no business inside an equation). Everything below
             # — divergence, detection, telemetry — scores the real text.
-            integrity_error = placeholder_error(cand, mask)
+            integrity_error = _source_placeholder_error(cand, mask)
             if tactic == "academic":
-                integrity_error = integrity_error or academic_error(work_text, cand)
-            cand, latex_stats = restore_latex(cand, mask)
+                integrity_error = integrity_error or academic_error(work_text, cand, syntax)
+            cand, latex_stats = _restore_source(cand, mask)
             divergence = _lexical_divergence(text, cand)
             ratio = _length_ratio(len(text), len(cand))
             drift = length_guard and _length_drift(len(text), len(cand))
@@ -1806,7 +1868,7 @@ def rewrite(
                         "length_ratio": ratio,
                         "length_drift": drift,
                         "wrappers_stripped": stripped,
-                        "latex": latex_stats if mask.count else None,
+                        syntax: latex_stats if mask.count else None,
                         "integrity_error": integrity_error,
                     },
                 )
@@ -1882,12 +1944,12 @@ def rewrite(
     if layer_a_after:
         info["layer_a_after"] = rec["layer_a_after"]
     if mask.count:
-        info["latex"] = rec["latex"]
-        if rec["latex"]["missing"]:
+        info[syntax] = rec[syntax]
+        if rec[syntax]["missing"]:
             eprint(
-                f"warning: {rec['latex']['missing']} of {mask.count} protected "
-                "math/LaTeX span(s) were dropped by the rewrite model and are "
-                "absent from the output"
+                f"warning: {rec[syntax]['missing']} of {mask.count} protected "
+                f"math/{_source_label(mask)} span(s) were dropped by the rewrite model "
+                "and are absent from the output"
             )
     info["output_chars"] = len(out)
     info["mode"] = "rewritten"
@@ -2025,17 +2087,20 @@ def parse_strategy(spec: str) -> list[tuple[str, float]]:
     return steps
 
 
-def _has_prose(text: str, mask: LatexMask) -> bool:
+def _has_prose(text: str, mask: SourceMask) -> bool:
     """True when *text* holds letters outside the protected placeholders."""
     return re.search(r"[^\W\d_]", mask.token_re.sub("", text)) is not None
 
 
-def _piece_placeholder_error(piece: str, out: str, mask: LatexMask) -> str | None:
+def _piece_placeholder_error(piece: str, out: str, mask: SourceMask) -> str | None:
     """Reject an output whose placeholder sequence differs from its input piece's."""
     if not mask.count:
         return None
     if mask.token_re.findall(out) != mask.token_re.findall(piece):
-        return "protected math/LaTeX placeholders were lost, duplicated, invented or reordered"
+        return (
+            f"protected math/{_source_label(mask)} placeholders were lost, duplicated, "
+            "invented or reordered"
+        )
     return None
 
 
@@ -2059,6 +2124,8 @@ def apply_strategy(
     protect_latex: str = "auto",
     noop_lex_floor: float = DEFAULT_NOOP_LEX_FLOOR,
     chunk_chars: int | None = None,
+    syntax: str = "latex",
+    protect_typst: str = "auto",
 ) -> tuple[str, dict[str, Any]]:
     """Apply a strategy's steps sequentially to *text* (best-effort rewrite).
 
@@ -2071,7 +2138,9 @@ def apply_strategy(
     (preamble, trailing commentary, fences, quotes) from the output.
 
     Math, LaTeX commands/environments, citation keys and code spans are masked
-    once for the whole strategy (``protect_latex``) and restored at the end.
+    once for the whole strategy (``protect_latex``; for ``syntax="typst"``,
+    math, Typst code, references, labels and raw spans under ``protect_typst``)
+    and restored at the end.
     An LLM step works piece by piece: the text is cut at paragraph or sentence
     boundaries into pieces of at most *chunk_chars* characters
     (WATERMARKS_REWRITE_CHUNK_CHARS, default DEFAULT_CHUNK_CHARS; 0 disables),
@@ -2112,7 +2181,8 @@ def apply_strategy(
     budget = max(1, candidates) * max(1, max_loops)
     # Mask once for the whole strategy: every step then feeds the next with the
     # protected spans already out of reach, and one restore closes the pass.
-    cur, mask = mask_latex(text, mode=protect_latex)
+    protect = protect_typst if syntax == "typst" else protect_latex
+    cur, mask = _mask_source(text, mode=protect, syntax=syntax)
 
     def generate(prompt: str, original: str) -> tuple[str, list[str]]:
         """One backend generation with the strategy's endpoint and sampling."""
@@ -2148,7 +2218,7 @@ def apply_strategy(
             pieces = [cur]
             attempts = 1
             out = _mlm_infill(cur, intensity)
-            problem = placeholder_error(out, mask)
+            problem = _source_placeholder_error(out, mask)
             if problem:
                 step_rejected.append(
                     {
@@ -2176,7 +2246,7 @@ def apply_strategy(
                 lead = "" if k == 1 else piece[: len(piece) - len(piece.lstrip())]
                 trail = "" if k == len(pieces) else piece[len(piece.rstrip()) :]
                 local = len(mask.token_re.findall(core)) if mask.count else 0
-                piece_mask = LatexMask(spans=("",) * local, prefix=mask.prefix) if local else None
+                piece_mask = replace(mask, spans=("",) * local) if local else None
                 label = step_label + (f", chunk {k}/{len(pieces)}" if len(pieces) > 1 else "")
                 accepted: tuple[str, list[str]] | None = None
                 rejected: list[dict[str, Any]] = []
@@ -2207,9 +2277,9 @@ def apply_strategy(
                         generations += 1
                     problem = _piece_placeholder_error(core, out, mask)
                     if tactic == "academic":
-                        problem = problem or academic_error(core, out)
+                        problem = problem or academic_error(core, out, syntax)
                     elif mask.count:
-                        problem = problem or structure_error(core, out)
+                        problem = problem or structure_error(core, out, syntax)
                     if problem or (checked and _length_drift(len(core), len(out))):
                         rejected.append(
                             {
@@ -2287,11 +2357,11 @@ def apply_strategy(
     # Layer A scrub once, on the complete strategy output (not per step).
     if layer_a_after and cur:
         cur = clean_text(cur)[0]
-    cur, latex_stats = restore_latex(cur, mask)
+    cur, latex_stats = _restore_source(cur, mask)
     if latex_stats["missing"]:
         eprint(
             f"warning: {latex_stats['missing']} of {mask.count} protected "
-            "math/LaTeX span(s) were dropped by the rewrite model"
+            f"math/{_source_label(mask)} span(s) were dropped by the rewrite model"
         )
 
     # No-op guard, judged on the returned text as in rewrite(). When the whole
@@ -2332,11 +2402,11 @@ def apply_strategy(
         "lexical_divergence": round(out_div, 4),
         "noop_lex_floor": noop_lex_floor,
         "noop": noop,
-        "protect_latex": protect_latex,
-        "latex_protected": mask.count,
+        f"protect_{syntax}": protect,
+        f"{syntax}_protected": mask.count,
     }
     if mask.count:
-        stats["latex"] = latex_stats
+        stats[syntax] = latex_stats
     return cur, stats
 
 
@@ -2399,6 +2469,21 @@ def build_parser() -> argparse.ArgumentParser:
         "afterwards ('auto': whenever the text looks like LaTeX/Markdown math). "
         "In print-prompt mode there is no map to restore, so the prompt carries a "
         "preserve-verbatim instruction instead.",
+    )
+    p.add_argument(
+        "--protect-typst",
+        choices=("auto", "on", "off"),
+        default=_env("WATERMARKS_PROTECT_TYPST", "auto"),
+        help="The --protect-latex counterpart for Typst sources: hold math, Typst "
+        "code, references, labels, comments and raw spans out of the rewrite "
+        "('auto': whenever the text looks like Typst).",
+    )
+    p.add_argument(
+        "--syntax",
+        choices=("auto", *SOURCE_SYNTAXES),
+        default="auto",
+        help="Source markup to protect: 'latex' (also Markdown math) or 'typst'. "
+        "'auto' (default) picks typst for a .typ input path and latex otherwise.",
     )
     p.add_argument(
         "--strategy",
@@ -2561,6 +2646,10 @@ def main() -> int:
         if args.allow_remote is not None
         else _flag_env("WATERMARKS_REWRITE_ALLOW_REMOTE")
     )
+    syntax = args.syntax
+    if syntax == "auto":
+        is_typst = args.path not in (None, "-") and Path(args.path).suffix.lower() == ".typ"
+        syntax = "typst" if is_typst else "latex"
     steps: list[tuple[str, float]] | None = None
     if args.strategy:
         try:
@@ -2595,6 +2684,8 @@ def main() -> int:
                 protect_latex=args.protect_latex,
                 noop_lex_floor=args.noop_lex_floor,
                 chunk_chars=args.chunk_chars,
+                syntax=syntax,
+                protect_typst=args.protect_typst,
             )
         else:
             result, info = rewrite(
@@ -2627,6 +2718,8 @@ def main() -> int:
                 chunk_shuffle=args.chunk_shuffle,
                 noop_lex_floor=args.noop_lex_floor,
                 protect_latex=args.protect_latex,
+                syntax=syntax,
+                protect_typst=args.protect_typst,
             )
     except (urllib.error.URLError, TimeoutError, RuntimeError) as e:
         eprint(f"rewrite failed: {e}")

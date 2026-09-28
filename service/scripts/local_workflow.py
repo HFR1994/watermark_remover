@@ -9,12 +9,19 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from academic_guard import academic_error, language_hint
 from common import MAX_INPUT_BYTES, eprint, looks_binary, subprocess_creationflags
-from latex_mask import LatexMask, mask_latex, placeholder_error, restore_latex
-from rewrite_text import _generate_rewrite, _length_drift, build_prompt
+from rewrite_text import (
+    _generate_rewrite,
+    _length_drift,
+    _mask_source,
+    _restore_source,
+    _source_placeholder_error,
+    build_prompt,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = Path(__file__).resolve().parent
@@ -32,6 +39,7 @@ def configure(model: str | None = None) -> None:
             "WATERMARKS_REWRITE_MODEL": model or DEFAULT_MODEL,
             "WATERMARKS_REWRITE_TEMPERATURE": "0.2",
             "WATERMARKS_PROTECT_LATEX": "on",
+            "WATERMARKS_PROTECT_TYPST": "on",
             "WATERMARKS_REWRITE_CANDIDATES": "1",
             "WATERMARKS_REWRITE_LOOPS": "1",
             "WATERMARKS_OLLAMA_CONTEXT": "4096",
@@ -59,12 +67,13 @@ def chunks(text: str, limit: int = CHUNK_CHARS) -> list[str]:
     return result
 
 
-def review_academic(text: str, model: str) -> tuple[str, dict]:
+def review_academic(text: str, model: str, syntax: str = "latex") -> tuple[str, dict]:
     """Review sequential chunks; reject damaged notation before writing a result.
 
-    Mechanical checks cannot certify scientific meaning or the force of a claim.
+    *syntax* is ``"latex"`` (also Markdown math) or ``"typst"``. Mechanical
+    checks cannot certify scientific meaning or the force of a claim.
     """
-    masked, mask = mask_latex(text, mode="on")
+    masked, mask = _mask_source(text, mode="on", syntax=syntax)
     pieces = chunks(masked)
     results = []
     reports = []
@@ -78,7 +87,7 @@ def review_academic(text: str, model: str) -> tuple[str, dict]:
         leading = piece[: len(piece) - len(piece.lstrip())]
         trailing = piece[len(piece.rstrip()) :]
         expected = mask.token_re.findall(core)
-        local_mask = LatexMask(spans=("",) * len(expected), prefix=mask.prefix)
+        local_mask = replace(mask, spans=("",) * len(expected))
         prompt = build_prompt(
             "academic",
             core,
@@ -107,7 +116,7 @@ def review_academic(text: str, model: str) -> tuple[str, dict]:
             raise RuntimeError(f"Section {number}: language changed; no output saved")
         if mask.token_re.findall(out) != expected:
             raise RuntimeError(f"Section {number}: protected notation changed; no output saved")
-        integrity_error = academic_error(core, out)
+        integrity_error = academic_error(core, out, syntax)
         if integrity_error:
             raise RuntimeError(f"Section {number}: {integrity_error}; no output saved")
         results.append(leading + out + trailing)
@@ -120,10 +129,10 @@ def review_academic(text: str, model: str) -> tuple[str, dict]:
             }
         )
     combined = "".join(results)
-    error = placeholder_error(combined, mask)
+    error = _source_placeholder_error(combined, mask)
     if error:
         raise RuntimeError(error)
-    output, restored = restore_latex(combined, mask)
+    output, restored = _restore_source(combined, mask)
     return output, {
         "ok": True,
         "assisted": True,
@@ -131,7 +140,7 @@ def review_academic(text: str, model: str) -> tuple[str, dict]:
         "model": model,
         "language_hint": language,
         "strategy": "academic@0.2",
-        "latex": restored,
+        syntax: restored,
         "sections": reports,
         "input_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "output_sha256": hashlib.sha256(output.encode("utf-8")).hexdigest(),
@@ -206,15 +215,16 @@ def main(argv: list[str] | None = None) -> int:
             check=False,
             creationflags=subprocess_creationflags,
         ).returncode
-    if source.suffix.lower() not in {".txt", ".tex", ".md", ".rst"}:
-        parser.error("Academic review accepts UTF-8 TXT, TEX, Markdown or RST source files")
+    if source.suffix.lower() not in {".txt", ".tex", ".typ", ".md", ".rst"}:
+        parser.error("Academic review accepts UTF-8 TXT, TEX, Typst, Markdown or RST source files")
     if source.stat().st_size > MAX_INPUT_BYTES:
         parser.error("Input exceeds the service file-size limit")
     data = source.read_bytes()
     if looks_binary(data):
         parser.error("Academic review requires a text source")
     try:
-        output, report = review_academic(data.decode("utf-8"), args.model)
+        syntax = "typst" if source.suffix.lower() == ".typ" else "latex"
+        output, report = review_academic(data.decode("utf-8"), args.model, syntax)
     except (UnicodeError, ValueError, RuntimeError, OSError) as exc:
         eprint(f"Academic review failed: {exc}")
         return 1

@@ -19,7 +19,7 @@ Agent skill + stdlib Python service to strip **multi-vendor AI provenance marks*
 | --- | --- | --- |
 | **A** | Invisible Unicode, exotic spaces, bidi, tag chars | Deterministic Python scripts |
 | **B** | Statistical (token-sampling) text watermarks | Agent rewrite + optional `rewrite_text.py` hook |
-| **Files** | C2PA / EXIF / XMP / doc props | PNG, JPEG, WebP, AVIF, HEIC, BMP, GIF, TIFF, SVG, PDF, DOCX, XLSX, PPTX, EPUB, ODT, HTML, Markdown, MP4/MOV/M4A/M4V, WAV, MP3, FLAC |
+| **Files** | C2PA / EXIF / XMP / doc props | PNG, JPEG, WebP, AVIF, HEIC, BMP, GIF, TIFF, SVG, PDF, DOCX, XLSX, PPTX, EPUB, ODT, HTML, Markdown, LaTeX, Typst, CSL, MP4/MOV/M4A/M4V, WAV, MP3, FLAC |
 
 Vendors / ecosystems (class-level): **Claude**, **Gemini / SynthID-Text**, **OpenAI** provenance surfaces, **open-LLM** Kirchenbauer-style (green-list) and keyed-Gumbel / EXP (Aaronson) marks.
 
@@ -323,6 +323,8 @@ python3 "$SCRIPTS/clean_text.py" draft.md -o draft.cleaned.md --stats
 python3 "$SCRIPTS/rewrite_text.py" draft.md --backend print-prompt --tactic paraphrase
 # Academic prose: math/LaTeX is masked out of the rewrite (default: auto)
 python3 "$SCRIPTS/rewrite_text.py" paper.tex --tactic academic --protect-latex on --json-stats
+# Typst: a .typ path selects the Typst masker (--syntax typst for stdin)
+python3 "$SCRIPTS/rewrite_text.py" thesis.typ --tactic academic --protect-typst on --json-stats
 # Optional local Ollama (loopback only by default — remote endpoints require
 # WATERMARKS_REWRITE_ALLOW_REMOTE=1 or --allow-remote):
 # WATERMARKS_REWRITE_BACKEND=ollama WATERMARKS_REWRITE_MODEL=llama3.2 \
@@ -564,12 +566,13 @@ set -a; . ./.env; set +a; python3 service/scripts/rewrite_text.py /tmp/x.txt -o 
 | `WATERMARKS_REWRITE_CANDIDATES` | `rewrite_text.py` hook, `server.py` `/clean` | Variants per evaluation round (default 1). On `/clean`, candidates × loops caps the attempts per Layer B step whose output length drifted |
 | `WATERMARKS_REWRITE_LOOPS` | `rewrite_text.py` hook, `server.py` `/clean` | Max evaluation rounds (default 1); see `WATERMARKS_REWRITE_CANDIDATES` for `/clean` |
 | `WATERMARKS_PROTECT_LATEX` | `rewrite_text.py` hook, `server.py` `/clean` | `auto` (default) / `on` / `off` — hold math, LaTeX commands/environments and verbatim spans out of the Layer B rewrite |
+| `WATERMARKS_PROTECT_TYPST` | `rewrite_text.py` hook, `server.py` `/clean` | `auto` (default) / `on` / `off` — the same for Typst sources: hold math, `#` code, `@` references, `<labels>`, comments and raw spans out of the Layer B rewrite |
 | `WATERMARKS_OLLAMA_CONTEXT` / `WATERMARKS_OLLAMA_MAX_TOKENS` / `WATERMARKS_OLLAMA_THREADS` | `server.py` `/clean` + `rewrite_text.py` hook | Floors for the Ollama `num_ctx` / `num_predict` options (the call also grows them with the prompt) and an optional `num_thread` |
 | `WATERMARKS_CLEAN_STRATEGY_FILE` | `server.py` `/clean` | Path to the Layer B strategy config JSON (default `config/clean_strategy.json`) |
 | `WATERMARKS_GUMBEL_KEY` | `detect_gumbel.py` / `text_detectors.py` | Secret key for keyed-Gumbel (EXP) same-key replay (e.g. `0x…`); preferred over argv — never logged |
 
 **Layer B is required for plain-text cleaning.** `/clean` always applies the default
-strategy (from `config/clean_strategy.json`, `{"default_strategy": "paraphrase@0.8,mlm@0.2"}`) to a `.txt` / `.text` file after Layer A, unless the request passes its own `"strategy"` option (an ordered `tactic@intensity` list) or `"rewrite": false` (Layer A only). A strategy step is `tactic@intensity`; the `mlm` step needs the `requirements-mlm.txt` stack in the service's interpreter plus the `roberta-large` weights, and any LLM step (`paraphrase`, `humanize`, `academic`, …) needs the `WATERMARKS_REWRITE_*` config. If the required backend/model isn't configured — or no strategy is available — `/clean` **rejects the request with a 400** (a broken `mlm` stack is caught before any LLM step runs), and so does a backend call that outlives `WATERMARKS_REWRITE_TIMEOUT` (the error names the variable); `GET /capabilities` → `layer_b` shows which tactics can run, and why not, before any text is sent. Code, config, data, markup and localization files (`.py`, `.json`, `.csv`, `.rst`, `.po`, …) share the text pipeline for Layer A but skip the default rewrite, which would change their identifiers, keys and values; `report.layer_b.skipped` says so, and an explicit `"strategy"` (or `"rewrite": true`) still rewrites them. LaTeX and Markdown sources (`.tex`, `.ltx`, `.md`) are containers: they get the metadata strip and Layer A by default, and `"rewrite": true` (or a `"strategy"`) additionally runs the Layer B strategy over their prose with the math, commands, environments and code spans masked out. Precedence for the config path: `--strategy-config` CLI flag > `WATERMARKS_CLEAN_STRATEGY_FILE` env var > the default `config/clean_strategy.json`.
+strategy (from `config/clean_strategy.json`, `{"default_strategy": "paraphrase@0.8,mlm@0.2"}`) to a `.txt` / `.text` file after Layer A, unless the request passes its own `"strategy"` option (an ordered `tactic@intensity` list) or `"rewrite": false` (Layer A only). A strategy step is `tactic@intensity`; the `mlm` step needs the `requirements-mlm.txt` stack in the service's interpreter plus the `roberta-large` weights, and any LLM step (`paraphrase`, `humanize`, `academic`, …) needs the `WATERMARKS_REWRITE_*` config. If the required backend/model isn't configured — or no strategy is available — `/clean` **rejects the request with a 400** (a broken `mlm` stack is caught before any LLM step runs), and so does a backend call that outlives `WATERMARKS_REWRITE_TIMEOUT` (the error names the variable); `GET /capabilities` → `layer_b` shows which tactics can run, and why not, before any text is sent. Code, config, data, markup and localization files (`.py`, `.json`, `.csv`, `.rst`, `.po`, …) share the text pipeline for Layer A but skip the default rewrite, which would change their identifiers, keys and values; `report.layer_b.skipped` says so, and an explicit `"strategy"` (or `"rewrite": true`) still rewrites them. LaTeX, Typst and Markdown sources (`.tex`, `.ltx`, `.typ`, `.md`) are containers: they get the metadata strip and Layer A by default, and `"rewrite": true` (or a `"strategy"`) additionally runs the Layer B strategy over their prose with the math, commands, environments and code spans (for Typst: math, `#` code, references, labels, comments and raw spans; `protect_typst`) masked out. CSL styles (`.csl`) get the metadata strip and Layer A only. Precedence for the config path: `--strategy-config` CLI flag > `WATERMARKS_CLEAN_STRATEGY_FILE` env var > the default `config/clean_strategy.json`.
 
 Math, LaTeX and verbatim spans are protected by default; see [Academic sources](#academic-sources-math-and-latex-are-held-out-of-the-rewrite).
 
@@ -874,6 +877,23 @@ inside an equation. The `print-prompt` backend is the exception: it hands the
 prompt to another agent and never sees the output, so there is no map to
 restore from and the prompt carries a preserve-verbatim instruction instead
 (`"latex_protection": "prompt-guard"`) — a request, not a guarantee.
+
+**Typst sources** (`.typ`) get the same treatment through their own masker
+(`--protect-typst auto|on|off`, `WATERMARKS_PROTECT_TYPST`, the `protect_typst`
+`/clean` option). `rewrite_text.py` picks it for a `.typ` path (`--syntax
+typst` otherwise) and `/clean` for a `.typ` file; the report keys follow
+(`protect_typst`, `typst_protected`, `typst`).
+
+| Protected | Left to the rewrite |
+| --- | --- |
+| Math, inline and display (`$rho(i)$`, `$ ... $ <eq:x>`) | Prose, headings' text, list items |
+| `#` code: `#import`/`#let`/`#set`/`#show` statements, `#sym.*`, call heads and arguments | The content block of a call (`#note[...]`, `#emph[...]`, `#chapter(...)[Title]`) and a figure's `caption: [...]`, with their own math and references still masked |
+| Layout calls whole (`table`, `grid`, `image`, `bibliography`, `outline`, …) | |
+| `@references` (with `[supplement]`), `<labels>`, `//` and `/* */` comments, raw blocks and `` `raw` ``, bare URLs | |
+| Markup a rewrite tends to "fix": heading markers, escapes, `\` line breaks, `~`, `--`/`---`, `−` `×` `±` `°` `²` `†` | |
+
+The `academic` check then compares Typst's `*strong*` / `_emphasis_` toggles
+instead of LaTeX commands and braces.
 
 **`--tactic academic`** is the matching prompt for scholarly prose: it varies
 connectives, clause order and sentence boundaries while keeping the language of
@@ -1432,6 +1452,7 @@ v0.7.0 brings the Layer B statistical-mark rewrite into the `/clean` service its
 
 - `academic` tactic and `--protect-latex` / `protect_latex` (default `auto`): math, LaTeX commands and environments, citation keys, code spans, YAML front matter and Markdown link targets are swapped for placeholders before the rewrite and restored after it; the round trip is reported (`report.layer_b.latex`), and an `academic` piece whose numbers, language or LaTeX structure changed is rejected and regenerated.
 - `/clean` runs every LLM strategy step **piece by piece**: long inputs are cut at paragraph or sentence boundaries into pieces of at most `WATERMARKS_REWRITE_CHUNK_CHARS` characters (default 2500), each with its own model call and checks, so a section never has to fit one context window and one damaged paragraph never spoils the rest.
+- Typst (`.typ`) and CSL (`.csl`) files are supported. `.typ`: `#set document` loses `author`, `keywords` and `description`, a `date` becomes `date: none`, AI-marked comments and editor modelines are dropped, and the Layer B strategy runs on request with math, `#` code, references, labels, comments and raw spans masked out (`typst_mask`, `--protect-typst` / `protect_typst` / `WATERMARKS_PROTECT_TYPST`). `.csl`: AI-marked `<author>`/`<contributor>`/`<summary>` entries and XML comments are dropped. The `academic` language check knows a wider English research, statistics and spatial-data vocabulary, multi-word terms included.
 - `.tex` / `.ltx` / `.md` sources take the Layer B strategy on request (`options.rewrite: true` or `options.strategy`) after the metadata strip and Layer A, with the spans above masked out; `options.rewrite: false` gives a Layer A-only text clean.
 - Ollama: `think: false` is sent for `WATERMARKS_REWRITE_REASONING_EFFORT=none` (the default; gemma4 and qwen3.5 otherwise think for minutes), `num_ctx` / `num_predict` grow with the prompt so an instruction is never dropped and an output never truncated, and `WATERMARKS_REWRITE_TIMEOUT` (default 120 s, cap 3600) bounds each call with an error that names the variable. The service's default temperature is 0.3 (was 0.9).
 - Model meta-commentary (preambles, "changes made" lists, `</think>` blocks, fences, quotes, prompt-jargon echoes) is stripped; length-drifted outputs are regenerated within the `WATERMARKS_REWRITE_CANDIDATES` × `WATERMARKS_REWRITE_LOOPS` budget; `backtranslate` and `structural` make two model calls each instead of one shortcut-prone prompt; a rewrite that comes back ≈ its input is reported as `noop`.

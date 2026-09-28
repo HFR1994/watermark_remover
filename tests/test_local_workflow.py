@@ -133,3 +133,21 @@ def test_review_rejects_clear_portuguese_to_english_translation(monkeypatch):
         local_workflow.review_academic(
             "O estudo examina o modelo e o parâmetro permanece indeterminado.", "fake"
         )
+
+
+def test_academic_review_of_a_typst_file_uses_the_typst_mask(tmp_path, monkeypatch):
+    seen = []
+
+    def generate(*args, original):
+        seen.append(args[4])
+        return original.replace("Estudamos", "Examinamos"), []
+
+    monkeypatch.setattr(local_workflow, "_generate_rewrite", generate)
+    source = tmp_path / "tese.typ"
+    source.write_text("Estudamos $D(p^2)$ em @gribov1978, ver <sec:a>.\n", encoding="utf-8")
+    assert local_workflow.main(["academic", str(source)]) == 0
+    output = (tmp_path / "tese.assisted.typ").read_text(encoding="utf-8")
+    assert output == "Examinamos $D(p^2)$ em @gribov1978, ver <sec:a>.\n"
+    assert all("@gribov1978" not in prompt and "$D(p^2)$" not in prompt for prompt in seen)
+    report = json.loads((tmp_path / "tese.assisted.typ.review.json").read_text(encoding="utf-8"))
+    assert report["typst"]["missing"] == 0
