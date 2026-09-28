@@ -42,8 +42,8 @@ def test_skill_documents_every_clean_option():
 
 def test_skill_never_puts_a_base64_payload_on_the_command_line():
     # `curl -d "{\"file\": \"$(base64 < f)\"}"` passes the whole file as one
-    # argument, which fails with "Argument list too long" above ~24 KB on
-    # Windows and ~96 KB on Linux -- most PDFs and images.
+    # argument, which fails with "Argument list too long" above ~96 KB on
+    # Linux -- most PDFs and images.
     assert "$(base64" not in _skill_text()
 
 
@@ -60,9 +60,7 @@ def _helpers() -> str:
 
 def _posix_shell() -> str | None:
     bash = shutil.which("bash")
-    # On Windows, System32\bash.exe launches WSL, whose VM has its own loopback
-    # and cannot reach a server bound to 127.0.0.1 here.
-    if bash is None or (sys.platform == "win32" and "system32" in bash.lower()):
+    if bash is None:
         return None
     probe = subprocess.run(
         [bash, "-c", "command -v curl && command -v base64"], capture_output=True, check=False
@@ -125,7 +123,7 @@ def test_health_check_tells_a_missing_key_from_a_down_service(service_url, tmp_p
 
 @needs_bash
 def test_helpers_move_files_past_the_argument_limit(service_url, tmp_path):
-    # ~120 KB, so its base64 (~160 KB) is past both the Windows (~32 KB) and the
+    # ~120 KB, so its base64 (~160 KB) is past the
     # Linux (128 KiB) limit on one command-line argument. A single carrier keeps
     # the server's work, and so the idle wait on the connection, short.
     body = "Olá\u200b mundo. ".encode() + b"The quick brown fox jumps over the lazy dog. " * 2_700

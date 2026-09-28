@@ -6,7 +6,6 @@
 	docker-core-build docker-core-help bootstrap-mlm smoke-mlm serve \
 	compose-up compose-up-heavy compose-check \
 	install-skill install-claude-code-skill install-claude-code-text-skill \
-	install-codex-skill install-codex-text-skill \
 	install-claude-project-skill package-cowork-skill package-cowork-text-skill \
 	install-cursor-text-skill plugin-validate clean
 
@@ -165,13 +164,6 @@ install-skill:
 # Claude Code: personal skills (~/.claude/skills), available in every project.
 install-claude-code-skill:
 	$(PYTHON) install_skill.py --skill remove-ai-marks --target claude-code
-
-# Codex (OpenAI): personal skills directory read at session start.
-install-codex-skill:
-	$(PYTHON) install_skill.py --skill remove-ai-marks --target codex $(INSTALL_FLAGS)
-
-install-codex-text-skill:
-	$(PYTHON) install_skill.py --skill clean-user-facing-text --target codex $(INSTALL_FLAGS)
 
 install-claude-code-text-skill:
 	$(PYTHON) install_skill.py --skill clean-user-facing-text --target claude-code

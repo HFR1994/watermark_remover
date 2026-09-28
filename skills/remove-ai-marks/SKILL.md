@@ -45,15 +45,14 @@ with the first word of the slash-command arguments before you ever see it.
 Cowork, cloud and sandboxed sessions run their shell away from the machine
 that serves `127.0.0.1:8765`; there, point `WATERMARKS_SERVICE_URL` at a
 service reachable from the sandbox (and set the key), or hand the user the
-PowerShell / curl calls below to run on the host:
+curl calls below to run on the host:
 
 ```bash
 WM="${WATERMARKS_SERVICE_URL:-http://127.0.0.1:8765}"
 
 # wm ENDPOINT [curl args...]: call the service, adding the bearer key when one is set.
-# The retries cover dropped connections: on some Windows machines a loopback
-# connection stalls for ~20 s and is then reset, about one call in ten. Every
-# endpoint this skill uses is safe to repeat.
+# The retries cover dropped loopback connections. Every endpoint this skill
+# uses is safe to repeat.
 wm() {
   local url="${WM}${1}"
   shift
@@ -65,7 +64,7 @@ wm() {
 
 # wm_post ENDPOINT FILE [OPTIONS_JSON]: POST FILE as {"name", "options", "file"}.
 # The body is streamed through stdin. Passing the base64 as a -d argument fails
-# with "Argument list too long" above ~24 KB on Windows and ~96 KB on Linux,
+# with "Argument list too long" above ~96 KB on Linux,
 # which rules out most PDFs and images. The answer lands in a temp file first:
 # curl can only truncate a named output file on retry, so a retry written to
 # stdout would append the new response to the half-received one.
@@ -237,24 +236,6 @@ R=$(mktemp)
 wm_post clean notes.md > "$R" && wm_save "$R" notes.cleaned.md
 wm_post clean report.pdf '{"deep_images": "lossless"}' > "$R" && wm_save "$R" report.cleaned.pdf
 ```
-
-**PowerShell** (no Bash on the host): `ConvertTo-Json` builds the body in
-memory, so there is no argument-length limit, and `Invoke-RestMethod` parses
-the answer:
-
-```powershell
-$WM = if ($env:WATERMARKS_SERVICE_URL) { $env:WATERMARKS_SERVICE_URL } else { 'http://127.0.0.1:8765' }
-$H = @{}; if ($env:WATERMARKS_SERVICE_API_KEY) { $H.Authorization = "Bearer $env:WATERMARKS_SERVICE_API_KEY" }
-$in = (Resolve-Path notes.md).Path
-$body = @{ name = Split-Path $in -Leaf; file = [Convert]::ToBase64String([IO.File]::ReadAllBytes($in)) } | ConvertTo-Json
-$r = Invoke-RestMethod -Method Post -Uri "$WM/clean" -Headers $H -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body))
-[IO.File]::WriteAllBytes((Join-Path $PWD 'notes.cleaned.md'), [Convert]::FromBase64String($r.cleaned))
-$r.report | ConvertTo-Json -Depth 8
-```
-
-Add `options = @{ deep_images = 'lossless' }` to the body hashtable to pass
-options. A 4xx/5xx makes `Invoke-RestMethod` throw; the service's JSON `error`
-is in `$_.ErrorDetails.Message`.
 
 ## Ethics
 
@@ -636,12 +617,7 @@ Without `make`, `make serve` is
 `python3 service/scripts/server.py --host 127.0.0.1 --port 8765`, run from the
 repo root (the default strategy path `config/clean_strategy.json` is relative
 to it) with the `WATERMARKS_REWRITE_*` variables in its environment for
-Layer B; on Windows, `docs/windows-autostart.md` registers it as a login task
-and `service/scripts/start_service.ps1` starts it with the repo's `.venv`
-interpreter (the one that has the `mlm` stack). Before starting one, check
-that nothing else already listens on the port (`Get-NetTCPConnection
--LocalPort 8765` on Windows, `ss -ltnp` on Linux): a second server can bind
-the same port silently and the older one keeps answering with older code. If
+Layer B. If
 the health check prints `401`, the service is up and wants a key (see *Service
 access*). Do **not** attempt to clean locally — this skill contains no cleaning
 code.

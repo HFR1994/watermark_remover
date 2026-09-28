@@ -46,15 +46,13 @@ python3 install_skill.py --skill remove-ai-marks --target claude-code
 | --- | --- | --- |
 | Claude Code (personal) | `--target claude-code` | `~/.claude/skills/<skill>` (honors `CLAUDE_CONFIG_DIR`) |
 | Claude Code (project) | `--target claude-project --project-dir PATH` | `PATH/.claude/skills/<skill>` |
-| Codex (OpenAI CLI / app / IDE extension) | `--target codex` | `~/.codex/skills/<skill>` (honors `CODEX_HOME`) |
 | Cowork, claude.ai, cloud sessions, routines | `--target cowork` | `dist/<skill>.zip` to upload under **Customize → Skills** |
 | Cursor | `--target cursor` (default) | `~/.cursor/skills/<skill>` |
 
 Shipped skills: `remove-ai-marks` (full, service-backed) and
 `clean-user-facing-text` (text only, self-contained). `--list` prints them.
 Existing installations are preserved unless you pass `--force`; replacement is
-staged first and the previous install is kept as a uniquely named backup under
-`<skills dir>/.backups/` (a dot-directory, so hosts do not list it as a skill).
+staged first and the previous install is kept as a uniquely named backup.
 `--link` symlinks this checkout instead of copying, so edits are picked up
 live. On Windows, use `py install_skill.py ...`; the `install-skill.sh` wrapper
 is provided for macOS/Linux shells.
@@ -173,22 +171,6 @@ watermarks / C2PA / Claude marks / SynthID-class text.” A project install is
 also what [cloud sessions](https://code.claude.com/docs/en/cloud-environments)
 read, since they clone the repository and load its `.claude/skills/`.
 
-### Codex
-
-```bash
-python3 install_skill.py --skill remove-ai-marks --target codex
-# or: make install-codex-skill
-```
-
-Codex reads personal skills from `~/.codex/skills/` (the same Agent Skills
-layout) when a session starts, so open a new Codex session afterwards and
-invoke the skill as `$remove-ai-marks` or by describing the task. The skill is
-the same thin HTTP client as everywhere else: the Codex sandbox must be able
-to reach the service (`WATERMARKS_SERVICE_URL`, default `http://127.0.0.1:8765`),
-so start it on the host first (`make serve`, or the Windows login task in
-[docs/windows-autostart.md](docs/windows-autostart.md)) and allow loopback
-network access in the Codex sandbox settings if it is restricted.
-
 ### Cowork (and claude.ai, cloud sessions, routines)
 
 Cowork sessions do **not** read `~/.claude/skills` on your machine — they load
@@ -286,14 +268,14 @@ curl -s http://127.0.0.1:8765/capabilities   # layer_b.default_strategy_usable: 
 
 `make TORCH_INDEX_URL=https://download.pytorch.org/whl/cuXXX bootstrap-mlm`
 installs a CUDA build instead; `make smoke-mlm` re-runs the check alone.
-Without `make` (e.g. Windows), install torch alone from the CPU index first, so
-pip doesn't pull the multi-GB CUDA wheel, then the pinned file, which brings
-torch's dependencies from PyPI (`--no-deps` keeps the torch index from
-supplying them), using the Python that runs `server.py`:
+Without `make`, install torch alone from the CPU index first, so pip doesn't
+pull the multi-GB CUDA wheel, then the pinned file, which brings torch's
+dependencies from PyPI (`--no-deps` keeps the torch index from supplying
+them), using the Python that runs `server.py`:
 
-```powershell
-python -m pip install --no-deps --index-url https://download.pytorch.org/whl/cpu "torch==2.14.0.*"
-python -m pip install -r service/scripts/requirements-mlm.txt
+```bash
+python3 -m pip install --no-deps --index-url https://download.pytorch.org/whl/cpu "torch==2.14.0.*"
+python3 -m pip install -r service/scripts/requirements-mlm.txt
 ```
 
 Restart the service afterwards. `GET /capabilities` → `layer_b` tells an agent,
@@ -306,15 +288,7 @@ time it loads them.
 
 ### Windows (no Docker)
 
-`service\scripts\start_service.ps1` starts the service the way the tests and
-the skill expect: from the repo root, with the repo's `.venv` interpreter when
-it exists (that is where `make bootstrap-mlm` puts the `mlm` stack; `-Python`
-or `WATERMARKS_SERVICE_PYTHON` names another one), with `.env` loaded,
-`HF_HUB_OFFLINE=1` unless overridden, and a refusal to start when another
-process already listens on the port (Windows lets a second server bind
-silently, and the older one keeps answering with older code).
-[docs/windows-autostart.md](docs/windows-autostart.md) registers it as a login
-task so the service is always up for Claude Code, Codex and Cowork.
+See [docs/windows-autostart.md](docs/windows-autostart.md) for auto-starting the service at Windows login without Docker.
 
 For the whole infra (core + optional harness/heavy backends), see [Docker / compose](#docker--compose) below.
 
@@ -1464,7 +1438,7 @@ v0.7.0 brings the Layer B statistical-mark rewrite into the `/clean` service its
 - `GET /capabilities` → `layer_b` reports whether the default strategy and each tactic can run, and why not; `/openapi.json` documents every `report.layer_b` field.
 - Sentence splitting (`chunk` tactic and chunk boundaries) no longer breaks after `e.g.`, `Sect.`, `Eq.`, `et al.` or an initial; `humanize_pass` keeps `12--18` ranges; the `humanize` prompt keeps hedges that limit a claim.
 - Code, config and data files get Layer A only unless a strategy is requested (`report.layer_b.skipped`).
-- Installer: `--target codex` (`~/.codex/skills`, `CODEX_HOME`) plus `make install-codex-skill`; the skill's shell helpers use `${1}` so a skill loader cannot substitute the slash-command arguments into them. `service/scripts/start_service.ps1` and the updated Windows auto-start guide start the service with the right interpreter, `.env`, and a port-in-use refusal.
+- The skill's shell helpers use `${1}` so a skill loader cannot substitute the slash-command arguments into them.
 
 
 - Pre-commit clean hook (`watermarks-remover-clean` / `clean_staged.py`): use content digests (`SHA-256`) and active action detection so clean files on disk are recognized without demanding infinite re-staging (#173)
