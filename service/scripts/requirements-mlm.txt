@@ -39,6 +39,6 @@ transformers==5.15.0
 # transformers 5.15.0 caps tokenizers at <=0.23.0; there is no 0.23.0
 # release (0.22.2 -> 0.23.1), so the highest compatible pin is 0.22.2.
 tokenizers==0.22.2
-huggingface_hub==1.27.0
+huggingface_hub==2.0.0
 numpy==2.5.3
 Pillow==12.3.0
