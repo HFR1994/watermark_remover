@@ -35,7 +35,7 @@
 # them). Once cached, HF_HUB_OFFLINE=1 stops the service from re-checking the
 # Hub every time it builds the pipeline.
 torch==2.14.0.*
-transformers==5.15.0
+transformers==5.19.0
 # transformers 5.15.0 caps tokenizers at <=0.23.0; there is no 0.23.0
 # release (0.22.2 -> 0.23.1), so the highest compatible pin is 0.22.2.
 tokenizers==0.22.2
